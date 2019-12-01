@@ -1,0 +1,272 @@
+﻿// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+#include "UnityCG.cginc"
+#include "HLSLSupport.cginc"
+#include "Lighting.cginc"
+
+#include "Shadows.cginc"
+#include "RefractionUtilities.cginc"
+
+
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<float4> _VolumetricShadowTex;
+
+int _It;
+float4 _CameraDepthTexture_ST;
+sampler2D  _CameraDepthTexture;
+int2 size;
+int width, height;
+float _FogDensity, _FogHeight, _FogHeightFalloff;
+float _FogNoiseStrength;
+float _FogNoisePower;
+float4 _WindParam;
+float3 _FogNoiseFrequency;
+float3 _FogColor;
+float _FogScatter, _FogRefract, _FogAbsorbance, _FogTransmittance;
+float3 _CamPos;
+float4x4 clipToWorld;
+float4x4 camToWorld;
+float zFar, zNear;
+float3 cameraHeading;
+float3 _WaterPosition;
+float3 lightDir;
+
+float hash(float x)
+{
+	float3 t = float3(x*51.1945 - 36.48, x*56.1665 - 13.562, x*94.15461);
+	return frac(t.x + t.y + t.z) * 2.0f - 1.0f;
+}
+float Unlerp(float min, float max, float x)
+{
+	return (x - min) / (max - min);
+}
+//float3 RandomSphere(float3 s)
+//{
+//	float3 u = float3(hash(s.y - s.z), hash(s.z%s.y), hash(s.x + s.y - s.z));
+//	return normalize(u);
+//}
+
+float Hash(float pos)
+{
+	float3 p3 = frac(float3(pos, pos, pos)* 95.0f);
+	p3 += dot(p3, p3 * 19.19f);
+	return frac((p3.x + p3.y)*p3.z);
+}
+
+float3 RandomSphere(float3 position,int seed)
+{
+	float s = (float)seed;
+	s *= 34.1234f;
+	position += float3(445.534f, 1645.053843f, 9451.34524f);
+	position /= float3(9.3214f, -138.31644164f, -3.654f) +s;
+	position = position;
+	return normalize(frac(float3(Hash(position.x), Hash(position.y), Hash(position.z)))*2.0f - 1.0f);
+}
+
+
+float LowNoise(float4 pos)
+{
+	pos.xyz = (pos.xyz);
+	float h = cos(pos.x + dot(pos.xz, pos.xz)) * sin(pos.y + dot(pos.xyz, pos.xyz)) * tan(pos.z*dot(pos.zx, pos.zx));
+
+	return saturate(h*0.5 + 0.5f);
+}
+
+float PerlinNoise(float3 pos, float3 wind, float3 frequency, float contrast)
+{
+	pos *= frequency;
+	pos += wind;
+
+	float noiseArray[8];
+
+	float3 pMin, pMax, pFrac;
+
+	pMin = floor(pos);
+	pMax = ceil(pos);
+	pFrac = frac(pos);
+
+	int id = 0;
+
+	// 000 001 010 011 
+	// 100 101 110 111
+
+	float3 pExtent, rndExtent;
+
+	for (int X = 0; X < 2; X++)
+	{
+		for (int Y = 0; Y < 2; Y++)
+		{
+			for (int Z = 0; Z < 2; Z++)
+			{
+
+				pExtent = float3(lerp(pMin.x, pMax.x, X), lerp(pMin.y, pMax.y, Y), lerp(pMin.z, pMax.z, Z));
+				rndExtent = normalize(lerp(RandomSphere(pExtent / frequency, (int)pExtent),RandomSphere((pExtent+0.5f) / frequency, (int)pExtent), abs(frac(_Time.x)-0.5f)*2.0f));
+				noiseArray[id] = dot(normalize(pExtent - pos), normalize(rndExtent));
+
+				id++;
+			}
+		}
+	}
+	float4 xPack0, xPack1;
+	xPack0 = float4(noiseArray[0],
+		noiseArray[1],
+		noiseArray[2],
+		noiseArray[3]);
+
+	xPack1 = float4(noiseArray[4],
+		noiseArray[5],
+		noiseArray[6],
+		noiseArray[7]);
+
+	float4 xPack = lerp(xPack0, xPack1, pFrac.x);
+
+	float2 zPack = lerp(xPack.xz, xPack.yw, pFrac.z);
+	return saturate(pow(lerp(zPack.x, zPack.y, pFrac.y)*0.5f + 0.5f, contrast)*contrast);
+}
+
+float GetFogDensity(float d, float fogHeight, float fogHeightFalloff, float marchStep, float height)
+{
+	float heightMask = saturate( Unlerp(fogHeight + fogHeightFalloff, fogHeight - fogHeightFalloff, height));// (1 - saturate(max(height - fogHeight, 0.0f) / fogHeightFalloff));
+	float fogMask = 1 / pow(exp(d* marchStep), 2.0f);
+	return  (1 - fogMask) *heightMask;
+}
+inline float GetLightFactor(float3 lightDir, float sampleHeight, float fogHeight, float fogFalloff, float fogDensity, float absorbance)
+{
+	float toFogTop = (sampleHeight - (fogHeight + fogFalloff)) / -lightDir.y;
+	float toFogBot = (sampleHeight - fogHeight) / -lightDir.y;
+	float blendTopBot = toFogTop*saturate(Unlerp(toFogTop, toFogBot, 0.0f));
+	return saturate((1 / pow(exp(blendTopBot*fogDensity*absorbance), 2.0f)));
+}
+
+[numthreads(32, 32, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+
+	float sunAtten;
+	float2 kSize = (float2)uint2(width, height) - float2(0.5f, 1.0f);
+	float2 kSizeF = (float2)kSize;
+	float2 uv = (float2)id.xy / kSize;
+	float depth = LinearEyeDepth(tex2Dlod(_CameraDepthTexture, float4(uv, 0.0f, 0.0f)).x);
+	uv.x = uv.x * 2 - 1;
+	uv.y = uv.y * 2 - 1;
+	float4 clipPos = float4(uv, 0.0f, 1.0f);
+	float3 worldPos = mul(clipToWorld, clipPos);
+	float3 noise = RandomSphere(worldPos.x + worldPos.y + worldPos.z,0)*0.002f;
+	//worldPos += noise;
+	float3 ray = worldPos - _CamPos;
+	float3 rayDir = normalize(ray);
+
+	float toPlane = dot(cameraHeading, rayDir);
+	float toNear = toPlane * zNear;
+
+	worldPos = _CamPos + rayDir * toNear;
+	float topDist = (worldPos.y - _WaterPosition.y) / (-rayDir.y);
+	depth = min(depth, lerp(topDist*toPlane, depth, step(topDist, 0)));
+	//worldPos = _CamPos + rayDir * zNear;
+
+	int iteration = _It;
+	float it = (float)iteration;
+	float density = _FogDensity;
+	float mStep = 0.5f;// (cos(_Time.x*10.0f)*0.5f+0.5f)*0.1f;
+	float flatDepth = (depth);
+
+	int maxStep = floor(flatDepth / mStep);
+	maxStep = min(maxStep, iteration);
+	float mS = (float)maxStep;
+	float lastStep = flatDepth % mStep;
+	float restDist = max(0.0f, flatDepth - mStep * maxStep);
+	if (maxStep == 0)
+		restDist = max(0.0f, flatDepth - lastStep);
+
+	float maxRay = mStep * it;
+	half atten = 0;
+	half height = 0.0f;
+	float perlin = 0.0f;
+	half heightMask = 0;
+	float3 color = 1.0f;
+	color = _FogColor;
+	float3 wind = _WindParam.xyz*(_Time.y*_WindParam.w);
+	float opacity = 0.0f;
+	half cur = 0;
+	float lightOp = 0.0f;
+	float fogMask, lightMask;
+	float lightSample;
+	float op;
+	float rIndex = 1.1f;
+	float3 totalMarch;
+	float absorbance = _FogAbsorbance * _FogDensity;
+	float transmittance = _FogTransmittance;
+	float3 samplePos;
+
+	float LdotV = pow(saturate(dot(normalize(_WorldSpaceLightPos0.xyz), normalize(rayDir))),3.0f);
+	float lightTerm;// = lerp(0.05f, 0.1f, pow(LdotV, 4.0f));
+	float ambientTerm= 0.001f;
+	float lightFactor;
+	//rayDir /= toPlane;
+	float3 scattering;
+	for (int i = 0; i < (maxStep - 1); i++)
+	{
+
+
+
+		totalMarch = rayDir * mStep /toPlane* i;
+		samplePos = worldPos + totalMarch;
+
+
+		cur = GetSunShadowsAttenuation_PCF3x3(samplePos, mStep*i);
+
+		perlin = PerlinNoise(samplePos, wind, _FogNoiseFrequency, _FogNoisePower);
+		density = saturate(lerp(_FogDensity - _FogNoiseStrength*_FogDensity, _FogDensity, perlin));
+		absorbance = _FogAbsorbance * density;
+		lightFactor = GetLightFactor(_WorldSpaceLightPos0.xyz, samplePos.y, _FogHeight, _FogHeightFalloff, _FogDensity, absorbance);
+		op = GetFogDensity(density, _FogHeight, _FogHeightFalloff, mStep/toPlane, samplePos.y);
+		opacity += op;// GetFogDensity(density, _FogHeight, _FogHeightFalloff, mStep, samplePos.y);
+		opacity = saturate(opacity);
+		lightTerm = lerp(0.003f, 0.02f, pow(LdotV*(1-density), 3.0f))*max(0.2f,density);
+
+		atten += cur * transmittance;
+		color += (_LightColor0.xyz * cur* lightTerm + unity_AmbientSky * (ambientTerm)) * transmittance  * lightFactor * mStep * (1-absorbance) ;
+		transmittance *= (1 - opacity*absorbance*absorbance);
+	}
+	//scattering /= it;
+	samplePos = samplePos + rayDir * restDist / toPlane;
+
+	cur = GetSunShadowsAttenuation_PCF3x3(samplePos, (depth - toNear));
+
+	opacity += GetFogDensity(_FogDensity, _FogHeight, _FogHeightFalloff, restDist / toPlane, samplePos.y);
+
+	color += 0.0;// (_LightColor0.xyz * cur + unity_AmbientSky) * transmittance * (1 - opacity) * lightTerm;
+
+				 //color *= lightTerm;
+	atten /= it;
+	//color /= length(totalMarch);
+	//color *= toPlane;
+	//break;
+	////opacity /= it;
+	//if (restDist > 0.0f)
+	//{
+	//	float restHeight = (samplePos + restDist * rayDir).y;
+	//	float toFogTop = (samplePos.y - (_FogHeight + _FogHeightFalloff)) / -rayDir.y;
+	//	float densityToTop = 1 / pow(exp(toFogTop*_FogDensity), 2.0f);
+	//	densityToTop = lerp(saturate(densityToTop), saturate(1 - densityToTop), step(rayDir.y, 0.0f));
+	//	//densityToTop = lerp(densityToTop,1.0f, step(rayDir.y, 0.0f));
+	//	float restHeightMask = (1 - saturate(max(restHeight - _FogHeight, 0.0f) / _FogHeightFalloff)*saturate(densityToTop));
+	//	float restDensity = 1 / pow(exp(_FogDensity*restDist*restHeightMask), 2.0f);
+	//	//opacity = 0.0f;
+	//	opacity += GetFogDensity(_FogDensity, _FogHeight, _FogHeightFalloff, restDist, restHeight);
+	//}
+
+	opacity = saturate(opacity);
+	atten = saturate(atten);
+
+
+	//atten *= (1/pow(exp(density*10.0f),2));
+	//color = _LightColor0.xyz * (opacity)+unity_AmbientSky * (1 - opacity);
+	//color = lerp(_FogColor + unity_AmbientSky, _LightColor0.xyz, atten) ;
+	//olor = _LightColor0.xyz * lightOp * opacity; 
+	_VolumetricShadowTex[id.xy] = float4(color, saturate(opacity));// atten.xxxx;
+
+
+}

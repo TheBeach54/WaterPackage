@@ -1,0 +1,273 @@
+﻿#pragma kernel CSMain
+
+struct WaterUnit
+{
+    float relativeHeight;
+    float speed;
+	float foam;
+};
+
+
+
+RWStructuredBuffer<WaterUnit> readBuffer;
+RWStructuredBuffer<WaterUnit> writeBuffer;
+
+Texture2D _OrthoCollisionsTex;
+
+int simulationWidth;
+int simulationHeight;
+
+float springStrength;
+float viscosity;
+
+float deltaTime;
+float time;
+
+float4 waterPosition;
+float3 oldWaterPosition;
+float borderMaskSize;
+
+float neighbourSpeedAveraging;
+float neighbourHeightAveraging;
+float speedDifferenceToFoam;
+
+float waveHeight;
+float waveHeight2;
+float waveHeight3;
+float waveHeight4;
+
+float waveRadius;
+float waveRadius2;
+float waveRadius3;
+float waveRadius4;
+float3 wavePosition;
+float3 wavePosition2;
+float3 wavePosition3;
+float3 wavePosition4;
+
+
+float3 offset;
+
+//Common parameter with the water shader and the world physics
+float _GSteepness;
+float4 _GWaves[6]; //x: amp y: wavelength z: phase w:angle
+float _Displacement;
+
+//Normalize float value between 0 and 1
+inline float InverseLerp(float min, float max, float x)
+{
+	return saturate((x - min) / (max - min));
+}
+
+float GetSphereWave(float3 spherePos, float sphereRadius, float3 wPos)
+{
+	float rad = sphereRadius;
+	float3 sphereToSpring = wPos - spherePos;
+	float3 sTSpringHorz = sphereToSpring * float3(1,0,1);
+	float h = -abs(sphereToSpring.y);
+	float a = length(sTSpringHorz) / rad;
+	float b = cos(asin(a)) * rad;
+	return min(b + h,rad);
+}
+
+inline float3 GerstnerWave(float3 wPos, float time)
+{
+	wPos = wPos.zxy;
+
+	const int count = 6;
+
+	float factor = 1 / (float)count;
+
+	float Xp = 0;
+	float Yp = 0;
+	float Zp = 0;
+
+	float A, w, p, Q;
+	float2 D;
+
+	for (int i = 0; i < count; i++)
+	{
+		A = _GWaves[i].x;
+		w = _GWaves[i].y;
+		p = _GWaves[i].z;
+		D = float2(cos(_GWaves[i].w), sin(_GWaves[i].w));
+
+
+		Q = saturate(_GSteepness) / (w * A);
+
+
+
+		Xp += Q * A * D.x * cos(dot(w * D, float2(wPos.x, wPos.y)) + p * time);
+		Yp += Q * A * D.y * cos(dot(w * D, float2(wPos.x, wPos.y)) + p * time);
+		Zp += A * sin(dot(w * D, float2(wPos.x, wPos.y)) + p * time);
+	}
+
+
+	wPos.z += Zp *factor;
+
+	return wPos.yzx;
+
+}
+
+[numthreads(32,1,1)]
+void CSMain (uint id : SV_DispatchThreadID)
+{
+	int px = id % simulationWidth;
+	int py = id / simulationWidth;
+	
+	//float3 offset = waterPosition.xyz - oldWaterPosition;
+	float2 offScale = offset.xz;
+	int2 off = round(offset.xz);
+
+	int2 inTexId = int2(simulationWidth - px, py);
+	float3 inObject = _OrthoCollisionsTex[inTexId].xyz;
+	float inObj = inObject.x;
+	float inObjBF = inObject.y;
+	float inObjVelocity = inObject.z;
+
+
+	int npx = px + off.x;
+	int npy = py + off.y;
+
+	px = npx % simulationWidth;
+	py = npy % simulationHeight;
+
+	int nid = npy * simulationWidth + npx;
+
+	int coord = nid;
+	float height = readBuffer[coord].relativeHeight;
+	float speed = readBuffer[coord].speed;
+	float foam = readBuffer[coord].foam;
+
+
+
+		
+
+	float2 rpos;
+	rpos.x = (float)px / (float)simulationWidth;
+	rpos.y = (float)py / (float)simulationHeight;
+
+
+	int coordup = px + max(py-1, 0)*simulationWidth;
+	int coorddn = px + min(py+1, simulationHeight-1)*simulationWidth;
+	int coordlt = max(px-1, 0) + py*simulationWidth;
+	int coordrt = min(px+1, simulationWidth-1) + py*simulationWidth;
+
+
+
+	float tempHeight = 0;
+
+
+
+
+
+
+	float3 wpos = float3(rpos.x -0.5f,0.0f,rpos.y -0.5f)*waterPosition.w + waterPosition.xyz;
+
+	wpos = GerstnerWave(wpos.xyz, time);
+	
+	wpos.y += height;
+
+
+
+
+
+	
+
+	const int kernelSize = 1; 
+
+	float aHeight = 0.0f;
+	float aSpeed = 0.0f;
+	float aFoam = 0.0f;
+	float count = 0.0f;
+
+
+
+
+		for (int x = -kernelSize; x <= kernelSize; x++)
+			for (int y = -kernelSize; y <= kernelSize; y++)
+			{
+				float weight = 1.0f - (length(float2(x, y)) / (float(kernelSize + 1)));
+
+				int coord = clamp(px + x, 0, simulationWidth - 1)
+					+ clamp(py + y, 0, simulationHeight - 1)*simulationWidth;
+
+				aHeight += readBuffer[coord].relativeHeight * weight;
+				aSpeed += readBuffer[coord].speed * weight;
+				aFoam += readBuffer[coord].foam * weight;
+				count += weight;
+			}
+
+
+
+		float spring = (0.0f - height) * springStrength;
+		speed += spring;
+		speed = lerp(speed, 0.0f, viscosity);
+
+		aHeight /= count;
+		aSpeed /= count;
+		aFoam /= count;
+
+
+
+
+
+		speed = lerp(speed, aSpeed, neighbourSpeedAveraging);
+		speed += (aHeight - height) * neighbourHeightAveraging;
+
+
+		foam += abs(aSpeed - speed) * speedDifferenceToFoam;
+
+		foam = lerp(foam,(saturate(aFoam - foam)), deltaTime);
+		
+		foam = (foam + aFoam)*0.5f;
+
+		foam = saturate(foam);
+
+		if (inObj < wpos.y && ((inObjBF) > wpos.y))
+		{
+			float temp = (inObj - wpos.y);
+			height = -temp*saturate(inObjVelocity / 40.0f);
+			//foam += deltaTime*6.0f;
+
+
+		}
+
+		height += speed;
+	
+
+		float borderMaskX = 1;
+		float borderMaskY = 1;
+		float borderMask = 1;
+
+
+
+if(borderMaskSize > 0)
+{
+	float borderMaskX = InverseLerp(0.0f,borderMaskSize, rpos.x ) * InverseLerp(1.0f,1.0f - borderMaskSize, rpos.x );
+	float borderMaskY = InverseLerp(0.0f,borderMaskSize, rpos.y) * InverseLerp(1.0f,1.0f - borderMaskSize, rpos.y );
+	float borderMask = borderMaskX * borderMaskY;
+	height = lerp(0.0f,height,borderMask);
+	foam = lerp(0.0f, foam, borderMask);
+}
+
+
+
+
+
+
+
+	if( npx >= simulationWidth || npx <= 0 || npy >= simulationHeight || npy <= 0)
+		{
+		height = 0.0f;
+		speed = 0.0f;
+		foam = 0.0f;
+	
+		}
+
+	//speed = lerp(0.0f,speed,borderMask);
+
+	writeBuffer[id].relativeHeight = height;
+	writeBuffer[id].speed = speed;
+	writeBuffer[id].foam = foam;
+}

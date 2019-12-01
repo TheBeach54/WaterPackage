@@ -1,0 +1,93 @@
+﻿#pragma kernel CSMain
+
+struct WaterUnit
+{
+    float relativeHeight;
+    float speed;
+	float foam;
+};
+
+RWStructuredBuffer<WaterUnit> simulationBuffer;
+
+RWTexture2D<float4> albedo;
+RWTexture2D<float4> normal;
+
+int simulationWidth;
+int simulationHeight;
+
+float3 getInfo(float2 position)
+{
+	position = saturate(position);
+
+	int index00 = floor(position.x * simulationWidth) +
+		floor(position.y * simulationHeight) * simulationWidth;
+
+	int index01 = floor(position.x * simulationWidth) +
+		min((floor(position.y * simulationHeight)+1), simulationHeight-1) * simulationWidth;
+
+	int index10 = min(floor(position.x * simulationWidth)+1, simulationWidth-1) +
+		floor(position.y * simulationHeight)* simulationWidth;
+	int index11 = min(floor(position.x * simulationWidth)+1, simulationWidth-1) +
+		min((floor(position.y * simulationHeight)+1), simulationHeight-1) * simulationWidth;
+
+	float fracX = frac(position.x * simulationWidth);
+	float fracY = frac(position.y * simulationHeight);
+
+	float3 value00 = float3(simulationBuffer[index00].relativeHeight,
+		simulationBuffer[index00].speed, simulationBuffer[index00].foam);
+	float3 value01 = float3(simulationBuffer[index01].relativeHeight,
+		simulationBuffer[index01].speed, simulationBuffer[index01].foam);
+	float3 value10 = float3(simulationBuffer[index10].relativeHeight,
+		simulationBuffer[index10].speed, simulationBuffer[index10].foam);
+	float3 value11 = float3(simulationBuffer[index11].relativeHeight,
+		simulationBuffer[index11].speed, simulationBuffer[index11].foam);
+
+	float3 value0010 = lerp(value00, value10, fracX);
+	float3 value0111 = lerp(value01, value11, fracX);
+	float3 value = lerp(value0010, value0111, fracY);
+
+	return value;
+}
+
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	uint2 picSize;
+	albedo.GetDimensions(picSize.x, picSize.y);
+
+	float2 rpos = (float2)id.xy / (float2)picSize;
+
+	//float index = floor(rpos.x*simulationWidth) + 
+	//	floor(rpos.y*simulationHeight) * simulationWidth;
+	//float height = simulationBuffer[index].relativeHeight;
+
+	float height11 = getInfo(rpos).x;
+	float foam = getInfo(rpos).z;
+	float3 offset = float3(-1.0f, 0.0f, 1.0f) * (1.0f / simulationWidth);
+	
+	// 00 10 20
+	// 01 11 21
+	// 02 12 22
+	
+	float height01 = getInfo(rpos + offset.xy).x;
+	float height21 = getInfo(rpos + offset.zy).x;
+	float height10 = getInfo(rpos + offset.yx).x;
+	float height12 = getInfo(rpos + offset.yz).x;
+
+	float h01 = height01;
+	float h21 = height21;
+	float h10 = height10;
+	float h12 = height12;
+
+	float3 vh = normalize(float3(1.0f, 0.0f, h21 - h01));
+	float3 vv = normalize(float3(0.0f, 1.0f, h12 - h10));
+	float3 normalValue = cross(vh, vv);
+
+	height11 = height11;
+
+	albedo[id.xy] = float4(height11.x, 0.0f,0.0f, foam.x);
+	normal[id.xy] = float4(0.0f, 0.5f*(normalValue.y+1.0f), 0.0f,
+								 0.5f*(normalValue.x+1.0f));
+	
+}

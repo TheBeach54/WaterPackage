@@ -1,0 +1,172 @@
+//--------------------------------------------------------------------------------//
+//---------------------Realistic Water V1.0 For Unity 5.6.1f1---------------------//
+//--------------------------------by César Creutz---------------------------------//
+//--------------------------------------2017--------------------------------------//
+//--------------------------------------------------------------------------------//
+
+This package consists of one shader, two scripts and some ressources as inputs examples.
+
+
+TO FIX: UV grab panning issue, fmod()
+
+
+Shader "Beach/Water" Settings details
+
+Requirement :
+
+Scene needs :
+
+- Scene should have a reflection probe or the realtime mirror reflection asset from unity http://wiki.unity3d.com/index.php/MirrorReflection4
+(when using the mirror reflection you'll need to exclude the water from the reflection prob rendering)
+- (optional) Directional Light with PassShadowMap.cs ( if you want shadow on your water you will need this script attached to your directional light and enable shadow on the material )
+
+
+Water GameObject needs :
+
+- MeshRenderer which uses a material with the "Beach/Water" shader
+- The script WaterRenderer.cs
+
+Mesh needs :
+
+- UV (texture coordinate)
+
+- (optional) Vertex Color :
+- RG is used as a flow map if enabled
+- B is unused
+- A is used to mask the water
+
+
+
+(variant) means that this Toggle changes the shader being used
+
+
+Properties breakdown : 
+
+
+(toggle) _DEFERRED_RENDERING : "Tell the shader to use the Deferred variant. This variant uses the normal buffer to blend caustics and get the depth buffer for free"
+
+TEXTURES
+(2D) Normal Map : "What normal map the shader should use for the wave of the water. It will be use twice at different scale (hardcoded)"
+(2D) Caustic Map (RG:DeformMap,B:Caustic Mask) : "Mask to draw the caustic in the blue channel and deform map to deform the caustics in the red and green"
+
+NORMAL MAPS PAN SETUP
+(float) Global Speed : " Global multiplier for the speed of the normal map and the caustic "
+(Vector) Pan Speed : " xy is the speed of the first normalmap, zw is the speed of the second one"
+(toggle) Use Flow Vertex (variant) : " If enable, the shader will use the vertex color RG as a flow map "
+(float) Flow Speed : " change the speed of the flow ( if using vertex flow map )"
+(float) Flow Intensity : " change the intensity of the flow ( if using vertex flow map )"
+
+WATER
+(Color) Water Color : " Color of the water "
+(float[01]) Water Opacity : " The color should either be multiplied by what's under the water or used as is"
+
+REFLECTION
+(float) Reflection Brightness : " Brightness multiplier for the reflection "
+(float) Reflection Power : " Power applied to the reflection ( should be use when using additive blending )"
+(float) Reflection Amplitude : " Deformation amplitude of the reflection ( only use with real reflection by a secondary camera )"
+(float) Reflection Glossiness : " Choose the water glossiness for the cubemap sampling. Water should always use 1 but other material can use smaller value to get blurry reflection"
+(Color) Specular Color : " Multiply" 
+(float) Normal Map Boost : " Multiply the input normal map "
+
+(toggle) Use Reflection Probe (variant) : " Use a reflection probe to generate the reflection, you can also use the script here http://wiki.unity3d.com/index.php/MirrorReflection4 to generate a real reflection by rendering the scene another time from another camera. The input reflection should be name : _ReflectionTex"
+(toggle) Box Projection (variant) : " Should the reflection probe be treated as a box projection ?"
+
+REFRACTION
+(float) Refraction Brightness : " Brightness multiplier for the refraction. Should be 1 but can be tweaked to get some specific effects"
+(float) Grab Amplitude : " Amplitude of the refraction "
+(float) Refraction Offset : " Offset the refraction depending on the screenspace normal of the water. Can be used to simulate real refraction but will produce some strange effect"
+(float) Refraction Bias : " To avoid having the objects in front of the water being refracted we check some screenspace depth and choose whether to use the distorded grab pass or the unaltered version. To avoid flickering we bias the amplitude of the refraction for the test at the cost of sampling one more time..."
+
+FRESNEL
+(float) Liquid refraction indice : "Indice of the water, default is 1.4 in the nature. The shader assumes that you are on earth with an air with an indice of 1"
+(float) Min Reflection : " Minimum reflection that the fresnel test will produce, 0.5 can be a good value for starting"
+(float) Max Reflection : " Maximum reflection that the fresnel test will produce, 0 is a good value but you can tweak it to get other result"
+
+SHADING
+(float[01]) Sun Shading : " How much we need to shade the water using the sun dir, clear water should use less than 0.1"
+(float[01]) Ambient Shading : " How much we need to shade the water using the sky ambient, clear water should use less than 0.1"
+(toggle) Draw Sun Disc (variant) : " Draw the sun in the water "
+(float[01]) Sun Scale : " Scale of the sun drawn on the reflection (if using Draw Sun Disc )"
+(float) Sun Power : " Apply a power on the sun, to get sharper or smoother transition"
+(toggle) Receive Shadows (variant) : " Receive shadows. You must add the PassShadowMap.cs script on your main directional light "
+(float[01]) Shadow Opacity : " Opacity of the shadow being drawn on the water"
+(float) Shadow Displacement Intensity : " We use the normal map Z component to offset the shadow map sampling, this value modulate the offset"
+
+CAUSTIC
+(toggle) Draw Caustic (variant) : " Draw caustic on the under water surfaces, in deferred rendering we use triplanar, in forward we just draw on caustic from the Top "
+(float) Caustic Brightness : " Brightness multiplier to boost or attenuate the caustics, the caustic is already linked to the directional intensity "
+(float) Caustic Color : " Color multiplier for the caustics "
+(Vector) Pan Speed (xy) Caustic (zw) Deform Map : " Setup the speed and direction of the Caustics and the deform map "
+(float) Caustic Scale : " Scale the caustic mask, the mask is drawn using the world space coordinate so values can be rather big depending on the scale of your world"
+(float) Caustic Deform Map Scale : " Scale the Deform map "
+(float) Caustic Deform Intensity Min : " When the Caustic Deform Gradient is at 0, how much should the deform map affects the caustics"
+(float) Caustic Deform Intensity Max : " When the Caustic Deform Gradient is at 1, how much should the deform map affects the caustics"
+(toggle) VISUALIZE Caustic Deform (RG) : " Enable a debug shader variant to visualize the deform map that will affect the caustics. The deformation is shown  "
+
+DEPTH GRADIENT AND MASK SETUP
+
+Depth Alpha Mask : " This mask is used to set the alpha of the water, usually you just want a small edge around your water to blend it with the environment"
+(float) Depth Mask Offset : " Offset the mask , at 0 the mask start at the water height"
+(float) Depth Mask Falloff : " Set the end of the gradient, when the water is completly visible, value should probably be negative"
+(toggle) Refract The Alpha Mask (variant) : " Each mask/gradient are refracted along side the grab pass but for the mask you can choose if you want it to be refracted "
+(toggle) VISUALIZE Depth Alpha Mask : " Enable a debug shader variant to visualize the Depth Alpha Mask "
+
+Depth Color Gradient : " This mask is used to colorize the water, it represents the density or opacity of the water in some sort"
+(float) Depth Color Offset : " Offset the mask, at 0 the mask start at the water height"
+(float) Depth Color Falloff : " Set the end of the gradient, when the water is fully colored, value should probably be negative"
+(float) Depth Color Power : " Change the shape of the gradient"
+(toggle) VISUALIZE Depth Color Gradient : " Enable a debug shader variant to visualize the Depth Color Gradient "
+
+Depth Reflection Mask : " This mask is used to mask the reflection when the water isn't deep"
+(float) Reflection Mask Offset : " Offset the mask, at 0 the mask start at the water height"
+(float) Reflection Mask Falloff : " Set the end of the gradient, when the mask don't affect the reflection anymore, value should probably be negative"
+(toggle) VISUALIZE Depth Reflection Mask : " Enable a debug shader variant to visualize the Depth Reflection Mask "
+
+Depth Caustic Top Mask : " This mask is used to mask the caustics from the water level "
+(float) Caustic Top Offset : " Offset the mask, at 0 the mask starts at the water height."
+(float) Caustic Top Falloff : " Set the end of the gradient. should be negative"
+(toggle) VISUALIZE Depth Caustic Top Mask : " Enable a debug shader variant to visualize the Depth Caustic Top Mask "
+
+Depth Caustic Bottom Mask : " This mask is used to mask the caustics from the bottom"
+(float) Caustic Bottom Offset : " Offset the mask, at 0 the mask start at the water height, which would be strange, this value should be negative and logicaly inferior to the previous value"
+(float) Caustic Bottom Falloff : " Set the end of the mask, where this mask stop affecting the caustics. This value should be positive"
+(toggle) VISUALIZE Caustic Bottom Mask : " Enable a debug shader variant to visualize the Caustic Bottom Mask "
+
+Depth Caustic Deform Gradient : " This mask is used to deform the caustics more when deeper in the water"
+(float) Caustic Depth Deform Offset : " Offset the mask, at 0 the mask start at the water height."
+(float) Caustic Depth Deform Falloff : "Set the end of the gradient, this value should definitely be negative"
+(toggle) VISUALIZE Caustic Depth Deform : " Enable a debug shader variant to visualize the Caustic Depth Deform "
+
+Depth Blur Mask : " This mask is used to interpolate between the blurred refraction and the normal one depending on the depth"
+(float) Depth Blur Offset : " Offset the mask, at 0 the mask start at the water height"
+(float) Depth Blur Falloff : " Set the end of the gradient, when the water is fully blurred, value should probably be negative"
+(float) Depth Blur Power : " Change the shape of the gradient"
+(toggle) VISUALIZE Depth Color Gradient : " Enable a debug shader variant to visualize the Depth Blur Gradient "
+
+
+
+
+Shader Feature Define 
+
+ _DEFERRED_RENDERING
+ _USE_REFLECTION_PROBE
+ _BOX_PROJECTION
+ _DRAW_CAUSTIC
+ _USE_FLOW_VERTEX
+ _DRAW_SUN_DISC
+ _BLUR_REFRACTION
+ _REFRACT_ALPHA_MASK
+ _RECEIVE_SHADOWS
+
+
+Debug Shader Feature Define
+
+_DEBUG_CAUSTICBOT_DEPTH
+_DEBUG_DEFORM_DEPTH
+_DEBUG_CAUSTIC_DEPTH
+_DEBUG_REFLECTION_DEPTH
+_DEBUG_COLOR_DEPTH
+_DEBUG_MASK_DEPTH
+_DEBUG_CAUSTIC_RG
+_DEBUG_FRESNEL
+_DEBUG_BLUR_DEPTH
